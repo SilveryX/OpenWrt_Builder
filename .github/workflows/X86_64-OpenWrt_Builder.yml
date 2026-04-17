@@ -30,7 +30,7 @@ env:
   OPENWRT_NAME: immortalwrt
   UPLOAD_TAG_NAME: X86_64
   REPO_URL: https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: openwrt-24.10
+  REPO_BRANCH: openwrt-25.12
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: X86_64/.config
   DIY_P1_SH: X86_64/diy-part1.sh
