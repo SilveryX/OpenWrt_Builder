@@ -185,6 +185,6 @@ jobs:
           # 可选：保留最近的几个 Release
         keep-latest-releases: 1
           # 是否同时删除对应的 tag
-        delete-tag: true 
+        delete-tags: true 
           # 必须提供 token
         token: ${{ secrets.GITHUB_TOKEN }}
