@@ -68,6 +68,11 @@ jobs:
         $GITHUB_WORKSPACE/$DIY_FEEDS_SH 
         ./scripts/feeds update -a
         ./scripts/feeds install -a
+        cd feeds/luci/themes
+        rm -r luci-theme-argon
+        git clone https://github.com/jerrykuku/luci-theme-argon.git
+        cd $GITHUB_WORKSPACE/openwrt
+        ./scripts/feeds install -a
 
     - name: 加载config & Modify Firmware
       run: |
