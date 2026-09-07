@@ -8,6 +8,16 @@ on:
         required: true
         default: 'main'
         type: string
+      server_url:
+        description: '后端服务地址 (Server URL)'
+        required: true
+        default: 'https://book.zcee.cc'
+        type: string
+      supabase_anon_key:
+        description: 'ANON_KEY (可选，留空则自动读取 Secret: NEXT_PUBLIC_SUPABASE_ANON_KEY)'
+        required: false
+        default: ''
+        type: string
       target_arch:
         description: '选择构建架构 (Target Architecture)'
         required: true
@@ -67,19 +77,14 @@ jobs:
         with:
           key: android-cargo
 
-      - name: Configure Environment Variables
+      - name: Prepare Android Project & Keystore
         run: |
-          cat << 'EOF' > apps/readest-app/.env.tauri.local
-          NEXT_PUBLIC_APP_PLATFORM=tauri
-          NEXT_PUBLIC_SUPABASE_URL=${{ vars.NEXT_PUBLIC_SUPABASE_URL || 'https://book.zcee.cc' }}
-          NEXT_PUBLIC_API_BASE_URL=${{ vars.NEXT_PUBLIC_API_BASE_URL || 'https://book.zcee.cc' }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
-          NEXT_PUBLIC_SELF_HOSTED=true
-          SELF_HOSTED=true
-          EOF
-          cp apps/readest-app/.env.tauri.local apps/readest-app/.env.local
-      - name: Generate Keystore for Signing
-        run: |
+          cd apps/readest-app/
+          rm -rf src-tauri/gen/android
+          pnpm tauri android init
+          pnpm tauri icon ../../data/icons/readest-book.png
+
+          # 生成签名密钥库
           keytool -genkeypair -v \
             -keystore "$RUNNER_TEMP/release.keystore" \
             -alias readest \
@@ -89,15 +94,7 @@ jobs:
             -storepass readest123 \
             -keypass readest123 \
             -dname "CN=Readest, OU=Self, O=Readest, L=City, ST=State, C=CN"
-      - name: Build and Sign Android APK
-        env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
-        run: |
-          cd apps/readest-app/
-          rm -rf src-tauri/gen/android
-          pnpm tauri android init
-          pnpm tauri icon ../../data/icons/readest-book.png
-          git checkout .
+
           # 配置 Gradle 签名文件
           pushd src-tauri/gen/android
           cat << EOF > keystore.properties
@@ -106,20 +103,66 @@ jobs:
           storeFile=$RUNNER_TEMP/release.keystore
           EOF
           popd
+
+      - name: Configure Environment Variables for Self-Hosted
+        env:
+          INPUT_ANON_KEY: ${{ github.event.inputs.supabase_anon_key }}
+          SECRET_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          SERVER_URL: ${{ github.event.inputs.server_url || 'https://book.zcee.cc' }}
+        run: |
+          FINAL_ANON_KEY="${INPUT_ANON_KEY:-$SECRET_ANON_KEY}"
+          if [ -z "$FINAL_ANON_KEY" ]; then
+            echo "❌ 错误: 未获取到 ANON_KEY！请在 Actions 界面输入 supabase_anon_key 或在 GitHub Repository Secrets 中配置 NEXT_PUBLIC_SUPABASE_ANON_KEY。"
+            exit 1
+          fi
+
+          echo "✅ 正在注入自建后端配置: $SERVER_URL"
+
+          # 写入全局构建环境变量
+          echo "NEXT_PUBLIC_APP_PLATFORM=tauri" >> $GITHUB_ENV
+          echo "NEXT_PUBLIC_SUPABASE_URL=$SERVER_URL" >> $GITHUB_ENV
+          echo "NEXT_PUBLIC_API_BASE_URL=$SERVER_URL" >> $GITHUB_ENV
+          echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$FINAL_ANON_KEY" >> $GITHUB_ENV
+          echo "NEXT_PUBLIC_SELF_HOSTED=true" >> $GITHUB_ENV
+          echo "SELF_HOSTED=true" >> $GITHUB_ENV
+
+          # 覆盖 Next.js 和 dotenv 实际读取的所有环境文件（确保 build 阶段 100% 打包进前端）
+          cat << EOF > apps/readest-app/.env.tauri
+          NEXT_PUBLIC_APP_PLATFORM=tauri
+          NEXT_PUBLIC_SUPABASE_URL=$SERVER_URL
+          NEXT_PUBLIC_API_BASE_URL=$SERVER_URL
+          NEXT_PUBLIC_SUPABASE_ANON_KEY=$FINAL_ANON_KEY
+          NEXT_PUBLIC_SELF_HOSTED=true
+          SELF_HOSTED=true
+          EOF
+
+          cp apps/readest-app/.env.tauri apps/readest-app/.env.local
+          cp apps/readest-app/.env.tauri apps/readest-app/.env
+          cp apps/readest-app/.env.tauri .env.local
+
+      - name: Build and Sign Android APK
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+        run: |
+          cd apps/readest-app/
           mkdir -p ../../output
+
           if [ "${{ github.event.inputs.target_arch }}" = "universal" ]; then
             pnpm tauri android build --apk
           else
             pnpm tauri android build -t aarch64 --apk
           fi
+
           BUILD_TOOLS_DIR=$(find $ANDROID_HOME/build-tools -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
           echo "Using Android build-tools: $BUILD_TOOLS_DIR"
+
           for apk in $(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk"); do
             echo "Signing and verifying $apk..."
             $BUILD_TOOLS_DIR/apksigner sign --ks "$RUNNER_TEMP/release.keystore" --ks-pass pass:readest123 --ks-key-alias readest --key-pass pass:readest123 "$apk" || true
             $BUILD_TOOLS_DIR/apksigner verify --verbose "$apk" || true
             cp "$apk" "../../output/Readest-${{ github.event.inputs.target_arch }}-signed.apk"
           done
+
       - name: Upload APK Artifact
         uses: actions/upload-artifact@main
         with:
