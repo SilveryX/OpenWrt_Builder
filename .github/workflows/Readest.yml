@@ -1,0 +1,128 @@
+name: Build Android APK (From Upstream)
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: '上游分支或版本 Tag (Upstream Branch/Tag)'
+        required: true
+        default: 'main'
+        type: string
+      target_arch:
+        description: '选择构建架构 (Target Architecture)'
+        required: true
+        default: 'aarch64'
+        type: choice
+        options:
+          - aarch64
+          - universal
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout upstream repository
+        uses: actions/checkout@main
+        with:
+          repository: 'readest/readest'
+          ref: ${{ github.event.inputs.upstream_ref || 'main' }}
+          submodules: recursive
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@master
+
+      - name: Setup Node.js
+        uses: actions/setup-node@main
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install NDK
+        run: sdkmanager "ndk;28.2.13676358"
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Prepare Vendor Assets (PDF.js / simplecc)
+        run: pnpm --filter @readest/readest-app setup-vendors
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android-cargo
+
+      - name: Configure Environment Variables
+        run: |
+          cat << 'EOF' > apps/readest-app/.env.tauri.local
+          NEXT_PUBLIC_APP_PLATFORM=tauri
+          NEXT_PUBLIC_SUPABASE_URL=${{ vars.NEXT_PUBLIC_SUPABASE_URL || 'https://book.zcee.cc' }}
+          NEXT_PUBLIC_API_BASE_URL=${{ vars.NEXT_PUBLIC_API_BASE_URL || 'https://book.zcee.cc' }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_SELF_HOSTED=true
+          SELF_HOSTED=true
+          EOF
+          cp apps/readest-app/.env.tauri.local apps/readest-app/.env.local
+      - name: Generate Keystore for Signing
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$RUNNER_TEMP/release.keystore" \
+            -alias readest \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass readest123 \
+            -keypass readest123 \
+            -dname "CN=Readest, OU=Self, O=Readest, L=City, ST=State, C=CN"
+      - name: Build and Sign Android APK
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+        run: |
+          cd apps/readest-app/
+          rm -rf src-tauri/gen/android
+          pnpm tauri android init
+          pnpm tauri icon ../../data/icons/readest-book.png
+          git checkout .
+          # 配置 Gradle 签名文件
+          pushd src-tauri/gen/android
+          cat << EOF > keystore.properties
+          keyAlias=readest
+          password=readest123
+          storeFile=$RUNNER_TEMP/release.keystore
+          EOF
+          popd
+          mkdir -p ../../output
+          if [ "${{ github.event.inputs.target_arch }}" = "universal" ]; then
+            pnpm tauri android build --apk
+          else
+            pnpm tauri android build -t aarch64 --apk
+          fi
+          BUILD_TOOLS_DIR=$(find $ANDROID_HOME/build-tools -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
+          echo "Using Android build-tools: $BUILD_TOOLS_DIR"
+          for apk in $(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk"); do
+            echo "Signing and verifying $apk..."
+            $BUILD_TOOLS_DIR/apksigner sign --ks "$RUNNER_TEMP/release.keystore" --ks-pass pass:readest123 --ks-key-alias readest --key-pass pass:readest123 "$apk" || true
+            $BUILD_TOOLS_DIR/apksigner verify --verbose "$apk" || true
+            cp "$apk" "../../output/Readest-${{ github.event.inputs.target_arch }}-signed.apk"
+          done
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@main
+        with:
+          name: Readest-Android-APK
+          path: output/*.apk
+          retention-days: 14
