@@ -26,6 +26,14 @@ on:
         options:
           - aarch64
           - universal
+      create_release:
+        description: '是否自动发布到 GitHub Release'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
 
 jobs:
   build-android:
@@ -48,6 +56,12 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+
+      - name: Extract App Version
+        run: |
+          VERSION=$(node -p "require('./apps/readest-app/package.json').version")
+          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "✅ 提取到应用版本号: v$VERSION"
 
       - name: Setup Java 17
         uses: actions/setup-java@v5
@@ -108,7 +122,7 @@ jobs:
         env:
           INPUT_ANON_KEY: ${{ github.event.inputs.supabase_anon_key }}
           SECRET_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
-          SERVER_URL: ${{ github.event.inputs.server_url || 'https://book.zcee.cc' }}
+          SERVER_URL: ${{ github.event.inputs.server_url }}
         run: |
           FINAL_ANON_KEY="${INPUT_ANON_KEY:-$SECRET_ANON_KEY}"
           if [ -z "$FINAL_ANON_KEY" ]; then
@@ -126,8 +140,7 @@ jobs:
           echo "NEXT_PUBLIC_SELF_HOSTED=true" >> $GITHUB_ENV
           echo "SELF_HOSTED=true" >> $GITHUB_ENV
 
-          # 覆盖 Next.js 和 dotenv 实际读取的所有环境文件（确保 build 阶段 100% 打包进前端）
-          cat << EOF > apps/readest-app/.env.tauri
+          cat << EOF > apps/readest-app/.env.local
           NEXT_PUBLIC_APP_PLATFORM=tauri
           NEXT_PUBLIC_SUPABASE_URL=$SERVER_URL
           NEXT_PUBLIC_API_BASE_URL=$SERVER_URL
@@ -135,10 +148,6 @@ jobs:
           NEXT_PUBLIC_SELF_HOSTED=true
           SELF_HOSTED=true
           EOF
-
-          cp apps/readest-app/.env.tauri apps/readest-app/.env.local
-          cp apps/readest-app/.env.tauri apps/readest-app/.env
-          cp apps/readest-app/.env.tauri .env.local
 
       - name: Build and Sign Android APK
         env:
@@ -160,7 +169,9 @@ jobs:
             echo "Signing and verifying $apk..."
             $BUILD_TOOLS_DIR/apksigner sign --ks "$RUNNER_TEMP/release.keystore" --ks-pass pass:readest123 --ks-key-alias readest --key-pass pass:readest123 "$apk" || true
             $BUILD_TOOLS_DIR/apksigner verify --verbose "$apk" || true
-            cp "$apk" "../../output/Readest-${{ github.event.inputs.target_arch }}-signed.apk"
+            TARGET_NAME="Readest-v${APP_VERSION}-${{ github.event.inputs.target_arch }}.apk"
+            cp "$apk" "../../output/$TARGET_NAME"
+            echo "Saved APK as: output/$TARGET_NAME"
           done
 
       - name: Upload APK Artifact
@@ -169,3 +180,21 @@ jobs:
           name: Readest-Android-APK
           path: output/*.apk
           retention-days: 14
+
+      - name: Publish to GitHub Release
+        if: ${{ github.event.inputs.create_release == 'true' || github.event.inputs.create_release == true }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.APP_VERSION }}
+          name: Readest v${{ env.APP_VERSION }} (Self-Hosted)
+          draft: false
+          prerelease: false
+          files: output/*.apk
+          body: |
+            ## 📱 Readest v${{ env.APP_VERSION }} Android APK (自建服专用构建)
+
+            - **上游版本**: `v${{ env.APP_VERSION }}` (${{ github.event.inputs.upstream_ref }})
+            - **后端地址**: `${{ github.event.inputs.server_url }}`
+            - **架构**: `${{ github.event.inputs.target_arch }}`
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
